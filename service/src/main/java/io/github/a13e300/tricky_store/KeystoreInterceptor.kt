@@ -17,6 +17,9 @@ import kotlin.system.exitProcess
 object KeystoreInterceptor : BinderInterceptor() {
     private val getKeyEntryTransaction =
         getTransactCode(IKeystoreService.Stub::class.java, "getKeyEntry") // 2
+    private val deleteKeyTransaction by lazy {
+        getTransactCode(IKeystoreService.Stub::class.java, "deleteKey")
+    }
 
     private lateinit var keystore: IBinder
 
@@ -31,7 +34,48 @@ object KeystoreInterceptor : BinderInterceptor() {
         callingPid: Int,
         data: Parcel
     ): Result {
+        // Intercept deleteKey for proxy keys — delete on remote + clean local cache
+        if (code == deleteKeyTransaction && Config.needProxy(callingUid)) {
+            kotlin.runCatching {
+                data.enforceInterface(IKeystoreService.DESCRIPTOR)
+                val descriptor =
+                    data.readTypedObject(KeyDescriptor.CREATOR) ?: return@runCatching
+                val proxyAlias = SecurityLevelInterceptor.getProxyAlias(callingUid, descriptor.alias)
+                if (proxyAlias != null) {
+                    // Delete on remote proxy
+                    kotlin.runCatching {
+                        io.github.a13e300.tricky_store.proxy.ProxyClient.delete(proxyAlias)
+                    }.onFailure {
+                        Logger.e("proxy delete failed for $proxyAlias", it)
+                    }
+                    // Clean local cache
+                    SecurityLevelInterceptor.removeProxyKey(callingUid, descriptor.alias)
+                    Logger.i("proxy deleteKey for uid=$callingUid alias=${descriptor.alias} proxyAlias=$proxyAlias")
+                    val p = Parcel.obtain()
+                    p.writeNoException()
+                    return OverrideReply(0, p)
+                }
+            }
+            // Not a proxy key — fall through to real keystore
+        }
         if (code == getKeyEntryTransaction) {
+            // Proxy mode: return cached proxy response
+            if (Config.needProxy(callingUid)) {
+                kotlin.runCatching {
+                    data.enforceInterface(IKeystoreService.DESCRIPTOR)
+                    val descriptor =
+                        data.readTypedObject(KeyDescriptor.CREATOR) ?: return@runCatching
+                    val response =
+                        SecurityLevelInterceptor.getProxyKeyResponse(callingUid, descriptor.alias)
+                        ?: return@runCatching
+                    Logger.i("proxy getKeyEntry for uid=$callingUid alias=${descriptor.alias}")
+                    val p = Parcel.obtain()
+                    p.writeNoException()
+                    p.writeTypedObject(response, 0)
+                    return OverrideReply(0, p)
+                }
+                // Fall through if no proxy key found - let it go to real keystore
+            }
             if (CertHack.canHack()) {
                 Logger.d("intercept pre  $target uid=$callingUid pid=$callingPid dataSz=${data.dataSize()}")
                 if (Config.needGenerate(callingUid))
