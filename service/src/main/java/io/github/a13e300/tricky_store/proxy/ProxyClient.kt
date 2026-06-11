@@ -65,12 +65,16 @@ object ProxyClient {
         params: List<ParamEntry>,
         flags: Int,
         entropy: ByteArray?,
+        attestKeyAlias: String?,
         securityLevel: Int = 1
     ): GenerateResult {
         val body = JSONObject().apply {
             put("targetPackage", targetPackage)
             // 1 = TEE, 2 = StrongBox
             put("securityLevel", securityLevel)
+            if (attestKeyAlias != null) {
+                put("attestKeyAlias", attestKeyAlias)
+            }
             if (signingCert != null) {
                 put("signingCert", Base64.encodeToString(signingCert, Base64.NO_WRAP))
             }

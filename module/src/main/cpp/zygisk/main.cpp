@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <jni.h>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <sys/stat.h>
 #include <tuple>
@@ -28,6 +29,7 @@ template <size_t N> struct FixedString {
 };
 
 using PropValue = std::array<char, 127>;
+using PackageValue = std::array<char, 255>;
 
 template<typename T, FixedString Field, bool Version=false>
 struct Prop {
@@ -52,6 +54,11 @@ using SpoofConfig = std::tuple<
     Prop<jstring, "BRAND">,
     Prop<jstring, "PRODUCT">,
     Prop<jstring, "DEVICE">,
+    Prop<jstring, "BRAND_FOR_ATTESTATION">,
+    Prop<jstring, "PRODUCT_FOR_ATTESTATION">,
+    Prop<jstring, "DEVICE_FOR_ATTESTATION">,
+    Prop<jstring, "MANUFACTURER_FOR_ATTESTATION">,
+    Prop<jstring, "MODEL_FOR_ATTESTATION">,
     Prop<jstring, "RELEASE", true>,
     Prop<jstring, "ID">,
     Prop<jstring, "INCREMENTAL", true>,
@@ -69,7 +76,7 @@ ssize_t xread(int fd, void *buffer, size_t count) {
     char *buf = (char *)buffer;
     while (count > 0) {
         ssize_t ret = read(fd, buf, count);
-        if (ret < 0) return -1;
+        if (ret <= 0) return total > 0 ? total : ret;
         buf += ret;
         total += ret;
         count -= ret;
@@ -82,7 +89,7 @@ ssize_t xwrite(int fd, const void *buffer, size_t count) {
     char *buf = (char *)buffer;
     while (count > 0) {
         ssize_t ret = write(fd, buf, count);
-        if (ret < 0) return -1;
+        if (ret <= 0) return total > 0 ? total : ret;
         buf += ret;
         total += ret;
         count -= ret;
@@ -114,34 +121,48 @@ public:
         std::string_view dir(app_data_dir);
         std::string_view process(nice_name);
 
-        bool isGms = false, isGmsUnstable = false;
-        isGms = dir.ends_with("/com.google.android.gms");
-        isGmsUnstable = process == "com.google.android.gms.unstable";
+        bool isGms = dir.ends_with("/com.google.android.gms");
+        std::string packageName;
+        if (!dir.empty()) {
+            auto lastSlash = dir.find_last_of('/');
+            packageName = lastSlash == std::string_view::npos
+                          ? std::string(dir)
+                          : std::string(dir.substr(lastSlash + 1));
+        }
+        std::string processName(process);
 
         env_->ReleaseStringUTFChars(args->app_data_dir, app_data_dir);
         env_->ReleaseStringUTFChars(args->nice_name, nice_name);
 
-        if (!isGms) {
+        if (packageName.empty()) {
             return;
         }
-        api_->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
-        if (!isGmsUnstable) {
-            return;
+        if (isGms) {
+            api_->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
         }
         
         int enabled = 0;
+        int shouldSpoof = 0;
         SpoofConfig spoofConfig{};
         auto fd = api_->connectCompanion();
         if (fd >= 0) [[likely]] {
-            // read enabled
-            xread(fd, &enabled, sizeof(enabled));
-            if (enabled) {
-                xread(fd, &spoofConfig, sizeof(spoofConfig));
+            PackageValue package{};
+            PackageValue process{};
+            strlcpy(package.data(), packageName.c_str(), package.size());
+            strlcpy(process.data(), processName.c_str(), process.size());
+            xwrite(fd, package.data(), package.size());
+            xwrite(fd, process.data(), process.size());
+
+            if (xread(fd, &enabled, sizeof(enabled)) == static_cast<ssize_t>(sizeof(enabled)) && enabled) {
+                if (xread(fd, &shouldSpoof, sizeof(shouldSpoof)) ==
+                    static_cast<ssize_t>(sizeof(shouldSpoof)) && shouldSpoof) {
+                    xread(fd, &spoofConfig, sizeof(spoofConfig));
+                }
             }
             close(fd);
         }
-        if (enabled) {
-            LOGI("spoofing build vars in GMS!");
+        if (enabled && shouldSpoof) {
+            LOGI("spoofing build vars in %s!", packageName.c_str());
             auto buildClass = env_->FindClass("android/os/Build");
             auto buildVersionClass = env_->FindClass("android/os/Build$VERSION");
 
@@ -252,27 +273,93 @@ void read_config(FILE *config, SpoofConfig &spoof_config) {
     }
 }
 
+bool target_contains_package(FILE *target, std::string_view package) {
+    char *l = nullptr;
+    struct finally {
+        char *(&l);
+
+        ~finally() { free(l); }
+    } finally{l};
+    size_t len = 0;
+    ssize_t n;
+    while ((n = getline(&l, &len, target)) != -1) {
+        if (n <= 1) continue;
+        std::string_view line{l, static_cast<size_t>(n)};
+        if (!line.empty() && line.back() == '\n') {
+            line.remove_suffix(1);
+        }
+        if (!line.empty() && line.back() == '\r') {
+            line.remove_suffix(1);
+        }
+        trim(line);
+        if (line.empty() || line.front() == '#') {
+            continue;
+        }
+        if (line.back() == '@' || line.back() == '!') {
+            line.remove_suffix(1);
+            trim(line);
+        }
+        if (line == package) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void companion_handler(int fd) {
     constexpr auto kSpoofConfigFile = "/data/adb/tricky_store/spoof_build_vars"sv;
+    constexpr auto kTargetConfigFile = "/data/adb/tricky_store/target.txt"sv;
     constexpr auto kDefaultSpoofConfig =
 R"EOF(MANUFACTURER=Google
-MODEL=Pixel
-FINGERPRINT=google/sailfish/sailfish:10/QPP3.190404.015/5505587:user/release-keys
+MODEL=Pixel 6
+FINGERPRINT=google/oriole/oriole:16/CP1A.260305.018/14887507:user/release-keys
 BRAND=google
-PRODUCT=sailfish
-DEVICE=sailfish
-RELEASE=10
-ID=QPP3.190404.015
-INCREMENTAL=5505587
+PRODUCT=oriole
+DEVICE=oriole
+BRAND_FOR_ATTESTATION=google
+PRODUCT_FOR_ATTESTATION=oriole
+DEVICE_FOR_ATTESTATION=oriole
+MANUFACTURER_FOR_ATTESTATION=Google
+MODEL_FOR_ATTESTATION=Pixel 6
+RELEASE=16
+ID=CP1A.260305.018
+INCREMENTAL=14887507
 TYPE=user
 TAGS=release-keys
-SECURITY_PATCH=2019-05-05
+SECURITY_PATCH=2026-03-05
 )EOF"sv;
+    PackageValue package{};
+    PackageValue process{};
+    if (xread(fd, package.data(), package.size()) != static_cast<ssize_t>(package.size()) ||
+        xread(fd, process.data(), process.size()) != static_cast<ssize_t>(process.size())) {
+        return;
+    }
+
     struct stat st{};
     int enabled = stat(kSpoofConfigFile.data(), &st) == 0;
     xwrite(fd, &enabled, sizeof(enabled));
 
     if (!enabled) {
+        return;
+    }
+
+    std::string_view packageName(package.data());
+    std::string_view processName(process.data());
+    int shouldSpoof = 0;
+    std::unique_ptr<FILE, decltype([](auto *f) { fclose(f); })> target{
+        fopen(kTargetConfigFile.data(), "r")
+    };
+    if (target && target_contains_package(target.get(), packageName)) {
+        shouldSpoof = 1;
+    }
+    if (!shouldSpoof &&
+        packageName == "com.google.android.gms"sv &&
+        processName == "com.google.android.gms.unstable"sv) {
+        shouldSpoof = 1;
+    }
+    xwrite(fd, &shouldSpoof, sizeof(shouldSpoof));
+
+    if (!shouldSpoof) {
         return;
     }
 

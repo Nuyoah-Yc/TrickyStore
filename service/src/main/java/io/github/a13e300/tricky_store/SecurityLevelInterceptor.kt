@@ -43,13 +43,16 @@ class SecurityLevelInterceptor(
             proxyAliases[Key(uid, alias)]?.response
 
         fun isProxyKey(uid: Int, alias: String): Boolean =
-            proxyAliases.containsKey(Key(uid, alias))
+            proxyAliases.containsKey(Key(uid, alias)) || Config.getProxyAlias(uid, alias) != null
 
-        fun removeProxyKey(uid: Int, alias: String): Boolean =
-            proxyAliases.remove(Key(uid, alias)) != null
+        fun removeProxyKey(uid: Int, alias: String): Boolean {
+            val removedMemory = proxyAliases.remove(Key(uid, alias)) != null
+            val removedPersisted = Config.removeProxyAlias(uid, alias)
+            return removedMemory || removedPersisted
+        }
 
         fun getProxyAlias(uid: Int, alias: String): String? =
-            proxyAliases[Key(uid, alias)]?.proxyAlias
+            proxyAliases[Key(uid, alias)]?.proxyAlias ?: Config.getProxyAlias(uid, alias)
     }
 
     data class Key(val uid: Int, val alias: String)
@@ -126,6 +129,15 @@ class SecurityLevelInterceptor(
                     return@mapNotNull null
                 keyParamToEntry(kp)
             }
+            val attestKeyAlias = attestationKeyDescriptor?.alias?.let { localAlias ->
+                getProxyAlias(callingUid, localAlias).also { proxyAlias ->
+                    if (proxyAlias == null) {
+                        Logger.i("no proxy alias mapped for attestation key uid=$callingUid alias=$localAlias")
+                    } else {
+                        Logger.i("use proxy attestation key alias=$proxyAlias for uid=$callingUid alias=$localAlias")
+                    }
+                }
+            }
 
             val result = ProxyClient.generate(
                 targetPackage = packageName,
@@ -136,6 +148,7 @@ class SecurityLevelInterceptor(
                 params = paramEntries,
                 flags = aFlags,
                 entropy = entropy,
+                attestKeyAlias = attestKeyAlias,
                 securityLevel = level
             )
 
@@ -185,6 +198,7 @@ class SecurityLevelInterceptor(
 
             proxyAliases[Key(callingUid, keyDescriptor.alias)] =
                 ProxyKeyInfo(result.alias, response)
+            Config.putProxyAlias(callingUid, keyDescriptor.alias, result.alias)
 
             val p = Parcel.obtain()
             p.writeNoException()
