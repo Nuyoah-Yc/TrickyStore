@@ -4,14 +4,18 @@
 #include <fcntl.h>
 #include <jni.h>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <tuple>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
 #include "logging.hpp"
+#include "lsplt.hpp"
 #include "zygisk.hpp"
 
 using zygisk::Api;
@@ -70,6 +74,110 @@ using SpoofConfig = std::tuple<
     Prop<jint, "DEVICE_INITIAL_SDK_INT", true>
 >;
 
+// ------------------------------------------------------------------
+// PIF-style native system property spoofing (ported from
+// PlayIntegrityFix). The Zygisk Build-field spoofing above only covers
+// reads via android.os.Build / Build.VERSION. DroidGuard and many
+// integrity checks read ro.* properties natively through libc's
+// __system_property_read_callback. We hook that symbol (via LSPlt PLT
+// rewriting, the same engine the original PIF used) in every loaded
+// library of the target process and rewrite the values that must stay
+// consistent with the spoofed Build fields: security patch, build id and
+// the device's initial/first API level. Values are derived entirely from
+// the existing spoof_build_vars config — no extra config file.
+// ------------------------------------------------------------------
+
+struct prop_info;
+using prop_read_callback_t = void (*)(void *cookie, const char *name, const char *value,
+                                      uint32_t serial);
+using system_property_read_callback_t = int (*)(const prop_info *, prop_read_callback_t, void *);
+
+static system_property_read_callback_t orig_read_callback = nullptr;
+// Set right before delegating to libc and consumed synchronously on the
+// same thread inside the callback, so thread_local keeps it race-free.
+static thread_local prop_read_callback_t saved_callback = nullptr;
+
+namespace prop_spoof {
+    static std::string security_patch;  // -> *.security_patch
+    static std::string build_id;        // -> *.build.id
+    static std::string first_api_level; // -> *api_level
+}
+
+static void spoof_prop_callback(void *cookie, const char *name, const char *value,
+                                uint32_t serial) {
+    if (cookie == nullptr || name == nullptr || value == nullptr || saved_callback == nullptr) {
+        return;
+    }
+    std::string_view prop(name);
+    const char *new_value = value;
+    if (prop.ends_with("api_level")) {
+        if (!prop_spoof::first_api_level.empty()) new_value = prop_spoof::first_api_level.c_str();
+    } else if (prop.ends_with(".security_patch")) {
+        if (!prop_spoof::security_patch.empty()) new_value = prop_spoof::security_patch.c_str();
+    } else if (prop.ends_with(".build.id")) {
+        if (!prop_spoof::build_id.empty()) new_value = prop_spoof::build_id.c_str();
+    } else if (prop == "init.svc.adbd") {
+        new_value = "stopped";
+    } else if (prop == "sys.usb.state") {
+        new_value = "mtp";
+    }
+    if (new_value != value) {
+        LOGD("spoof prop %s: %s -> %s", name, value, new_value);
+    }
+    saved_callback(cookie, name, new_value, serial);
+}
+
+static int spoof_system_property_read_callback(const prop_info *pi, prop_read_callback_t callback,
+                                               void *cookie) {
+    if (pi == nullptr || callback == nullptr || cookie == nullptr) {
+        return orig_read_callback(pi, callback, cookie);
+    }
+    saved_callback = callback;
+    return orig_read_callback(pi, spoof_prop_callback, cookie);
+}
+
+// Pull a single field value out of the already-received SpoofConfig by name.
+static std::string field_value(const SpoofConfig &cfg, std::string_view field) {
+    std::string result;
+    std::apply([&](auto &&... entry) {
+        ((entry.has_value &&
+          std::string_view(std::remove_cvref_t<decltype(entry)>::getField()) == field
+              ? (result.assign(entry.value.data()), true)
+              : false) || ...);
+    }, cfg);
+    return result;
+}
+
+// Install the property hook into every file-backed executable mapping of
+// the current process. Returns true if libc's original was backed up,
+// which means the module must stay loaded (callback code lives in it).
+static bool install_property_hook() {
+    if (prop_spoof::security_patch.empty() && prop_spoof::build_id.empty() &&
+        prop_spoof::first_api_level.empty()) {
+        return false;  // nothing to spoof
+    }
+    std::set<std::pair<dev_t, ino_t>> seen;
+    bool registered = false;
+    for (auto &map : lsplt::MapInfo::Scan()) {
+        if (map.inode == 0 || map.dev == 0) continue;
+        if ((map.perms & PROT_EXEC) == 0) continue;
+        if (map.path.empty() || map.path.front() != '/') continue;
+        if (!std::string_view(map.path).ends_with(".so")) continue;
+        if (!seen.emplace(map.dev, map.inode).second) continue;
+        if (lsplt::RegisterHook(map.dev, map.inode, "__system_property_read_callback",
+                                reinterpret_cast<void *>(spoof_system_property_read_callback),
+                                reinterpret_cast<void **>(&orig_read_callback))) {
+            registered = true;
+        }
+    }
+    if (registered && lsplt::CommitHook() && orig_read_callback != nullptr) {
+        LOGI("property hook installed");
+        return true;
+    }
+    LOGE("failed to install property hook");
+    return false;
+}
+
 
 ssize_t xread(int fd, void *buffer, size_t count) {
     ssize_t total = 0;
@@ -110,8 +218,12 @@ public:
     }
 
     void preAppSpecialize(AppSpecializeArgs *args) override {
-        api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
+        // NOTE: DLCLOSE_MODULE_LIBRARY is set lazily below. If we end up
+        // installing the persistent native property hook, the module must
+        // stay mapped (the hook callback lives in it), so we must NOT
+        // request unload for that process.
         if (args->app_data_dir == nullptr) {
+            api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
             return;
         }
 
@@ -135,6 +247,7 @@ public:
         env_->ReleaseStringUTFChars(args->nice_name, nice_name);
 
         if (packageName.empty()) {
+            api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
             return;
         }
         if (isGms) {
@@ -161,6 +274,7 @@ public:
             }
             close(fd);
         }
+        bool keep_loaded = false;
         if (enabled && shouldSpoof) {
             LOGI("spoofing build vars in %s!", packageName.c_str());
             auto buildClass = env_->FindClass("android/os/Build");
@@ -183,6 +297,17 @@ public:
                          std::remove_cvref_t<decltype(args)>::getField(),
                          args.value.data())), ...);
             }, spoofConfig);
+
+            // Keep ro.* native reads consistent with the spoofed Build
+            // fields (PIF-style). Values come from the same spoof_build_vars.
+            prop_spoof::security_patch = field_value(spoofConfig, "SECURITY_PATCH");
+            prop_spoof::build_id = field_value(spoofConfig, "ID");
+            prop_spoof::first_api_level = field_value(spoofConfig, "DEVICE_INITIAL_SDK_INT");
+            keep_loaded = install_property_hook();
+        }
+        // Only request module unload when no persistent hook was installed.
+        if (!keep_loaded) {
+            api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
         }
     }
 
@@ -327,6 +452,7 @@ INCREMENTAL=14887507
 TYPE=user
 TAGS=release-keys
 SECURITY_PATCH=2026-03-05
+DEVICE_INITIAL_SDK_INT=31
 )EOF"sv;
     PackageValue package{};
     PackageValue process{};

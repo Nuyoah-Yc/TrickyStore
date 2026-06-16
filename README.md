@@ -46,6 +46,23 @@ TAGS=release-keys
 SECURITY_PATCH=2024-07-05
 ```
 
+### Native property spoofing (PlayIntegrityFix-style)
+
+In addition to spoofing the Java `android.os.Build` / `Build.VERSION` fields, the Zygisk module
+now also hooks libc's `__system_property_read_callback` (via LSPlt) inside the target/GMS
+processes, so native `ro.*` reads stay consistent with the spoofed Build fields. The values are
+derived from the **same `spoof_build_vars`** file — no extra config:
+
+- properties ending with `api_level`        → `DEVICE_INITIAL_SDK_INT`
+- properties ending with `.security_patch`   → `SECURITY_PATCH`
+- properties ending with `.build.id`         → `ID`
+- `init.svc.adbd` → `stopped`, `sys.usb.state` → `mtp`
+
+This covers most of what PlayIntegrityFix provided, so a separate PIF module is generally not
+needed. Note: LSPlt rewrites the PLT of libraries already loaded at process start; the hook is
+installed at app-specialize time. Set `DEVICE_INITIAL_SDK_INT` in `spoof_build_vars` to your
+spoofed device's launch SDK for the first-API-level checks.
+
 For Magisk users: if you don't need this feature and zygisk is disabled, please remove or rename the
 folder `/data/adb/modules/tricky_store/zygisk` manually.
 
