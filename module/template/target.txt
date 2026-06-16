@@ -2,6 +2,7 @@
 # proxy-only 架构：这里列出的每个包都会走远程“干净设备”做真实密钥认证。
 # 旧的 @ / ! 后缀已废弃（会被自动忽略），无需再加。
 com.google.android.gms
+com.android.vending
 io.github.vvb2060.keyattestation
 io.github.vvb2060.mahoshojo
 icu.nullptr.nativetest

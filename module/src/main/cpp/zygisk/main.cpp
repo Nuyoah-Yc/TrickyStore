@@ -4,10 +4,8 @@
 #include <fcntl.h>
 #include <jni.h>
 #include <memory>
-#include <set>
 #include <string>
 #include <string_view>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <tuple>
 #include <unistd.h>
@@ -90,7 +88,8 @@ using SpoofConfig = std::tuple<
 struct prop_info;
 using prop_read_callback_t = void (*)(void *cookie, const char *name, const char *value,
                                       uint32_t serial);
-using system_property_read_callback_t = int (*)(const prop_info *, prop_read_callback_t, void *);
+// Matches libc's real signature (returns void).
+using system_property_read_callback_t = void (*)(const prop_info *, prop_read_callback_t, void *);
 
 static system_property_read_callback_t orig_read_callback = nullptr;
 // Set right before delegating to libc and consumed synchronously on the
@@ -127,13 +126,15 @@ static void spoof_prop_callback(void *cookie, const char *name, const char *valu
     saved_callback(cookie, name, new_value, serial);
 }
 
-static int spoof_system_property_read_callback(const prop_info *pi, prop_read_callback_t callback,
-                                               void *cookie) {
+static void spoof_system_property_read_callback(const prop_info *pi, prop_read_callback_t callback,
+                                                void *cookie) {
+    if (orig_read_callback == nullptr) return;
     if (pi == nullptr || callback == nullptr || cookie == nullptr) {
-        return orig_read_callback(pi, callback, cookie);
+        orig_read_callback(pi, callback, cookie);
+        return;
     }
     saved_callback = callback;
-    return orig_read_callback(pi, spoof_prop_callback, cookie);
+    orig_read_callback(pi, spoof_prop_callback, cookie);
 }
 
 // Pull a single field value out of the already-received SpoofConfig by name.
@@ -148,29 +149,37 @@ static std::string field_value(const SpoofConfig &cfg, std::string_view field) {
     return result;
 }
 
-// Install the property hook into every file-backed executable mapping of
-// the current process. Returns true if libc's original was backed up,
-// which means the module must stay loaded (callback code lives in it).
+// Install the property hook by rewriting libc's PLT entry for
+// __system_property_read_callback (the same scope the original
+// PlayIntegrityFix uses). libc's __system_property_get/__system_property_read
+// reach the callback through libc's own PLT, so hooking libc alone covers the
+// standard read path while keeping the blast radius minimal — rewriting every
+// loaded library's PLT is what caused processes to abort. Returns true if the
+// hook was committed, meaning the module must stay loaded (callback code lives
+// in it).
 static bool install_property_hook() {
     if (prop_spoof::security_patch.empty() && prop_spoof::build_id.empty() &&
         prop_spoof::first_api_level.empty()) {
         return false;  // nothing to spoof
     }
-    std::set<std::pair<dev_t, ino_t>> seen;
-    bool registered = false;
+    dev_t libc_dev = 0;
+    ino_t libc_inode = 0;
     for (auto &map : lsplt::MapInfo::Scan()) {
         if (map.inode == 0 || map.dev == 0) continue;
-        if ((map.perms & PROT_EXEC) == 0) continue;
-        if (map.path.empty() || map.path.front() != '/') continue;
-        if (!std::string_view(map.path).ends_with(".so")) continue;
-        if (!seen.emplace(map.dev, map.inode).second) continue;
-        if (lsplt::RegisterHook(map.dev, map.inode, "__system_property_read_callback",
-                                reinterpret_cast<void *>(spoof_system_property_read_callback),
-                                reinterpret_cast<void **>(&orig_read_callback))) {
-            registered = true;
+        if (std::string_view(map.path).ends_with("/libc.so")) {
+            libc_dev = map.dev;
+            libc_inode = map.inode;
+            break;
         }
     }
-    if (registered && lsplt::CommitHook() && orig_read_callback != nullptr) {
+    if (libc_inode == 0) {
+        LOGE("libc.so not found, skip property hook");
+        return false;
+    }
+    if (lsplt::RegisterHook(libc_dev, libc_inode, "__system_property_read_callback",
+                            reinterpret_cast<void *>(spoof_system_property_read_callback),
+                            reinterpret_cast<void **>(&orig_read_callback)) &&
+        lsplt::CommitHook() && orig_read_callback != nullptr) {
         LOGI("property hook installed");
         return true;
     }
@@ -322,9 +331,22 @@ private:
     template<typename T>
     inline bool setField(jclass clazz, const char* field, const PropValue& value);
 
+    // Clear any pending JNI exception (e.g. NoSuchFieldError) so a missing
+    // field is silently skipped. Leaving it pending makes ART abort the whole
+    // process at the next AssertNoPendingException() — this happens for fields
+    // that don't exist on a given Android version (e.g. *_FOR_ATTESTATION on
+    // Android 13).
+    inline jfieldID getFieldId(jclass clazz, const char* field, const char* sig) {
+        auto id = env_->GetStaticFieldID(clazz, field, sig);
+        if (!id && env_->ExceptionCheck()) {
+            env_->ExceptionClear();
+        }
+        return id;
+    }
+
     template<>
     inline bool setField<jstring>(jclass clazz, const char* field, const PropValue& value) {
-        auto id = env_->GetStaticFieldID(clazz, field, "Ljava/lang/String;");
+        auto id = getFieldId(clazz, field, "Ljava/lang/String;");
         if (!id) return false;
         env_->SetStaticObjectField(clazz, id, env_->NewStringUTF(value.data()));
         return true;
@@ -332,7 +354,7 @@ private:
 
     template<>
     inline bool setField<jint>(jclass clazz, const char* field, const PropValue& value) {
-        auto id = env_->GetStaticFieldID(clazz, field, "I");
+        auto id = getFieldId(clazz, field, "I");
         if (!id) return false;
         char *p = nullptr;
         jint x = static_cast<jint>(strtol(value.data(), &p, 10));
@@ -345,7 +367,7 @@ private:
 
     template<>
     inline bool setField<jboolean>(jclass clazz, const char* field, const PropValue& value) {
-        auto id = env_->GetStaticFieldID(clazz, field, "Z");
+        auto id = getFieldId(clazz, field, "Z");
         if (!id) return false;
         auto x = std::string_view(value.data());
         if (x == "1" || x == "true") {
