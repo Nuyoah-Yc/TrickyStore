@@ -29,6 +29,17 @@ class SecurityLevelInterceptor(
         // Maps local key alias → proxy alias for proxy-generated keys
         private val proxyAliases = ConcurrentHashMap<Key, ProxyKeyInfo>()
 
+        // Tags a remote device cannot satisfy on behalf of this device:
+        //  - ATTESTATION_ID_*: a device can only attest its OWN IDs → CANNOT_ATTEST_IDS.
+        //  - INCLUDE_UNIQUE_ID: needs the unique-ID-attestation permission the remote
+        //    proxy app lacks → PERMISSION_DENIED. Strip them before forwarding.
+        private val nonProxyableTags = setOf(
+            Tag.ATTESTATION_ID_BRAND, Tag.ATTESTATION_ID_DEVICE, Tag.ATTESTATION_ID_PRODUCT,
+            Tag.ATTESTATION_ID_SERIAL, Tag.ATTESTATION_ID_IMEI, Tag.ATTESTATION_ID_MEID,
+            Tag.ATTESTATION_ID_MANUFACTURER, Tag.ATTESTATION_ID_MODEL, Tag.ATTESTATION_ID_SECOND_IMEI,
+            Tag.INCLUDE_UNIQUE_ID
+        )
+
         fun getProxyKeyResponse(uid: Int, alias: String): KeyEntryResponse? =
             proxyAliases[Key(uid, alias)]?.response
 
@@ -109,11 +120,18 @@ class SecurityLevelInterceptor(
             }
 
             // Convert KeyParameter[] to proxy param entries
+            var strippedIds = 0
             val paramEntries = params.mapNotNull { kp ->
                 if (kp.tag == Tag.ATTESTATION_CHALLENGE || kp.tag == Tag.ATTESTATION_APPLICATION_ID)
                     return@mapNotNull null
+                if (kp.tag in nonProxyableTags) {
+                    strippedIds++
+                    return@mapNotNull null
+                }
                 keyParamToEntry(kp)
             }
+            if (strippedIds > 0)
+                Logger.i("stripped $strippedIds non-proxyable attestation tag(s) for uid=$callingUid (ID/unique-ID cannot be attested by a remote device)")
             val attestKeyAlias = attestationKeyDescriptor?.alias?.let { localAlias ->
                 getProxyAlias(callingUid, localAlias).also { proxyAlias ->
                     if (proxyAlias == null) {
