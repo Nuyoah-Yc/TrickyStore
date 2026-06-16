@@ -70,6 +70,9 @@ extract "$ZIPFILE" 'sepolicy.rule'   "$MODPATH"
 extract "$ZIPFILE" 'daemon'          "$MODPATH"
 chmod 755 "$MODPATH/daemon"
 
+ui_print "- Extracting WebUI"
+extract "$ZIPFILE" 'webroot/index.html' "$MODPATH"
+
 mkdir "$MODPATH/zygisk"
 
 if [ "$ARCH" = "x64" ]; then

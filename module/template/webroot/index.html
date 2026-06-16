@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TrickyStore</title>
+<style>
+  :root {
+    --bg: #14151a;
+    --card: #1e2027;
+    --card2: #262932;
+    --line: #2e313c;
+    --fg: #e7e9ee;
+    --muted: #8b8f9c;
+    --accent: #7c9cff;
+    --accent-d: #5a78d6;
+    --green: #57c47a;
+    --orange: #e0a458;
+    --purple: #b48cf0;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bot: env(safe-area-inset-bottom, 0px);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Roboto", "Segoe UI", sans-serif;
+    font-size: 15px; line-height: 1.4;
+    padding-bottom: calc(76px + var(--safe-bot));
+  }
+  header {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(20,21,26,.92); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
+    padding: calc(12px + var(--safe-top)) 14px 10px;
+  }
+  .title { display: flex; align-items: baseline; gap: 8px; }
+  .title h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .title .ver { color: var(--muted); font-size: 12px; }
+  .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .controls { margin-top: 10px; display: flex; gap: 8px; align-items: center; }
+  .search {
+    flex: 1; background: var(--card2); border: 1px solid var(--line);
+    color: var(--fg); border-radius: 10px; padding: 9px 12px; font-size: 14px; outline: none;
+  }
+  .search:focus { border-color: var(--accent-d); }
+  .iconbtn {
+    background: var(--card2); border: 1px solid var(--line); color: var(--fg);
+    border-radius: 10px; padding: 9px 11px; font-size: 13px; white-space: nowrap;
+  }
+  .iconbtn.on { background: var(--accent-d); border-color: var(--accent-d); color: #fff; }
+  .list { padding: 8px 10px 0; }
+  .group-label { color: var(--muted); font-size: 12px; margin: 12px 6px 6px; letter-spacing: .04em; }
+  .row {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 11px 12px; margin-bottom: 8px;
+  }
+  .row.sel { border-color: var(--accent-d); background: var(--card2); }
+  .cb {
+    width: 22px; height: 22px; flex: none; border-radius: 6px;
+    border: 2px solid var(--muted); display: grid; place-items: center;
+    transition: .12s; cursor: pointer;
+  }
+  .row.sel .cb { background: var(--accent); border-color: var(--accent); }
+  .cb svg { width: 14px; height: 14px; opacity: 0; }
+  .row.sel .cb svg { opacity: 1; }
+  .pkg { flex: 1; min-width: 0; }
+  .pkg .name { font-size: 14px; word-break: break-all; }
+  .pkg .tag { font-size: 11px; color: var(--muted); }
+  .pkg .tag.uninst { color: var(--orange); }
+  .mode {
+    flex: none; background: var(--bg); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 6px 6px; font-size: 12px;
+  }
+  .mode.hide { display: none; }
+  .footer {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+    background: rgba(20,21,26,.95); backdrop-filter: blur(8px);
+    border-top: 1px solid var(--line);
+    padding: 10px 14px calc(10px + var(--safe-bot));
+    display: flex; gap: 10px; align-items: center;
+  }
+  .footer .count { color: var(--muted); font-size: 13px; flex: 1; }
+  .btn {
+    border: none; border-radius: 10px; padding: 12px 18px; font-size: 15px; font-weight: 600;
+    color: #fff; background: var(--accent-d);
+  }
+  .btn:disabled { opacity: .5; }
+  .btn.ghost { background: var(--card2); color: var(--fg); border: 1px solid var(--line); }
+  .empty { color: var(--muted); text-align: center; padding: 40px 20px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; margin: 10px 10px 0; padding: 12px;
+  }
+  .card label { font-size: 13px; font-weight: 600; display: block; margin-bottom: 8px; }
+  .card input {
+    width: 100%; background: var(--card2); border: 1px solid var(--line);
+    color: var(--fg); border-radius: 10px; padding: 9px 12px; font-size: 14px; outline: none;
+  }
+  .card input:focus { border-color: var(--accent-d); }
+  .card .hint { color: var(--muted); font-size: 11px; margin-top: 6px; line-height: 1.5; }
+  .toast {
+    position: fixed; left: 50%; bottom: calc(86px + var(--safe-bot)); transform: translateX(-50%);
+    background: #000; color: #fff; padding: 10px 16px; border-radius: 20px; font-size: 13px;
+    opacity: 0; transition: opacity .2s; z-index: 50; max-width: 86%; text-align: center;
+  }
+  .toast.show { opacity: .95; }
+  .spin { animation: sp 1s linear infinite; display: inline-block; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <div class="title"><h1>TrickyStore</h1><span class="ver" id="ver"></span></div>
+  <div class="sub" id="sub">加载中…</div>
+  <div class="controls">
+    <input class="search" id="search" placeholder="搜索包名…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+    <button class="iconbtn" id="sysToggle">系统应用</button>
+  </div>
+</header>
+
+<div class="card">
+  <label>调度服务器地址</label>
+  <input id="proxyUrl" placeholder="https://tk.cyymzy.com/api/relay" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+  <div class="hint">仅「代理 @」模式使用:attestation 会转发到调度服务端的 relay 地址。留空 = 用默认 https://tk.cyymzy.com/api/relay。</div>
+</div>
+
+<div class="card">
+  <label>卡密</label>
+  <input id="cardKey" placeholder="后台生成的卡密" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+  <div class="hint">「代理 @」模式按次计费,每次出证消耗 1 次。在管理后台生成卡密后填入此处。留空 = 不带卡密(服务端会拒绝)。</div>
+</div>
+
+<div class="list" id="list">
+  <div class="empty"><span class="spin">⟳</span> 正在读取应用列表…</div>
+</div>
+
+<div class="footer">
+  <span class="count" id="count"></span>
+  <button class="btn ghost" id="reload">重载</button>
+  <button class="btn" id="save" disabled>保存</button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const CONFIG = "/data/adb/tricky_store";
+const TARGET = CONFIG + "/target.txt";
+const PROXY = CONFIG + "/proxy.txt";
+const CARD = CONFIG + "/card.txt";
+let originalProxy = "";
+let originalCard = "";
+
+// ---- ksu.exec wrapper (Promise) ----
+let cbId = 0;
+function sh(cmd) {
+  return new Promise((resolve) => {
+    if (typeof ksu === "undefined" || !ksu.exec) {
+      resolve({ errno: -1, stdout: "", stderr: "ksu API unavailable" });
+      return;
+    }
+    const name = "__ts_cb_" + (cbId++);
+    window[name] = (errno, stdout, stderr) => {
+      try { delete window[name]; } catch (e) { window[name] = undefined; }
+      resolve({ errno: errno | 0, stdout: stdout || "", stderr: stderr || "" });
+    };
+    try {
+      ksu.exec(cmd, "{}", name);
+    } catch (e) {
+      try { delete window[name]; } catch (_) {}
+      resolve({ errno: -1, stdout: "", stderr: String(e) });
+    }
+  });
+}
+
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.remove("show"), 1800);
+}
+
+// ---- state ----
+const MODES = { hack: "默认拦截", gen: "生成证书 !", proxy: "代理 @" };
+let apps = [];                 // [{name, system, installed}]
+const selected = new Map();    // name -> 'hack' | 'gen' | 'proxy'
+let showSystem = false;
+let query = "";
+
+const $ = (id) => document.getElementById(id);
+
+function parseTarget(text) {
+  selected.clear();
+  text.split(/\r?\n/).forEach((raw) => {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) return;
+    if (line.endsWith("@")) selected.set(line.slice(0, -1).trim(), "proxy");
+    else if (line.endsWith("!")) selected.set(line.slice(0, -1).trim(), "gen");
+    else selected.set(line, "hack");
+  });
+}
+
+function buildTargetText() {
+  const lines = ["# Generated by TrickyStore WebUI"];
+  [...selected.keys()].sort().forEach((name) => {
+    const m = selected.get(name);
+    lines.push(m === "gen" ? name + "!" : m === "proxy" ? name + "@" : name);
+  });
+  return lines.join("\n") + "\n";
+}
+
+async function loadAll() {
+  $("list").innerHTML = '<div class="empty"><span class="spin">⟳</span> 正在读取应用列表…</div>';
+  // version (cosmetic; ignore failure)
+  sh("grep '^version=' /data/adb/modules/tricky_store/module.prop 2>/dev/null | head -n1 | cut -d= -f2")
+    .then(r => { if (r.stdout.trim()) $("ver").textContent = r.stdout.trim(); });
+
+  const [allRes, sysRes, tgtRes, proxyRes, cardRes] = await Promise.all([
+    sh("pm list packages"),
+    sh("pm list packages -s"),
+    sh("cat " + TARGET + " 2>/dev/null"),
+    sh("cat " + PROXY + " 2>/dev/null"),
+    sh("cat " + CARD + " 2>/dev/null"),
+  ]);
+
+  originalProxy = (proxyRes.stdout || "").trim();
+  $("proxyUrl").value = originalProxy;
+  originalCard = (cardRes.stdout || "").trim();
+  $("cardKey").value = originalCard;
+
+  if (allRes.errno !== 0) {
+    $("list").innerHTML = '<div class="empty">读取应用失败:<br>' +
+      (allRes.stderr || "请确认从 SukiSU / KernelSU / Magisk 管理器打开本页") + "</div>";
+    return;
+  }
+
+  const sysSet = new Set(
+    sysRes.stdout.split(/\r?\n/).map(l => l.replace(/^package:/, "").trim()).filter(Boolean)
+  );
+  const names = allRes.stdout.split(/\r?\n/)
+    .map(l => l.replace(/^package:/, "").trim()).filter(Boolean);
+  const installedSet = new Set(names);
+
+  apps = names.map(n => ({ name: n, system: sysSet.has(n), installed: true }));
+
+  parseTarget(tgtRes.stdout || "");
+  // selected packages not currently installed -> keep them visible so user can remove
+  selected.forEach((_m, name) => {
+    if (!installedSet.has(name)) apps.push({ name, system: false, installed: false });
+  });
+
+  apps.sort((a, b) => a.name.localeCompare(b.name));
+  render();
+}
+
+function render() {
+  const list = $("list");
+  const q = query.toLowerCase();
+
+  const visible = apps.filter(a => {
+    if (q && !a.name.toLowerCase().includes(q)) return false;
+    if (selected.has(a.name)) return true;       // selected always shown (ignores system filter)
+    if (!a.installed) return true;
+    if (a.system && !showSystem) return false;
+    return true;
+  });
+  // selected first, then alphabetical
+  visible.sort((a, b) => {
+    const sa = selected.has(a.name), sb = selected.has(b.name);
+    if (sa !== sb) return sa ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  $("sub").textContent = "共 " + apps.length + " 个应用 · 已选 " + selected.size;
+  $("count").textContent = "已选 " + selected.size + " 个";
+  $("save").disabled = false;
+
+  if (!visible.length) {
+    list.innerHTML = '<div class="empty">没有匹配的应用</div>';
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  let lastSelHeader = false, firstUnselDone = false;
+
+  visible.forEach(a => {
+    const isSel = selected.has(a.name);
+    if (isSel && !lastSelHeader) {
+      frag.appendChild(groupLabel("已选择"));
+      lastSelHeader = true;
+    }
+    if (!isSel && !firstUnselDone) {
+      frag.appendChild(groupLabel("全部应用"));
+      firstUnselDone = true;
+    }
+    frag.appendChild(rowEl(a, isSel));
+  });
+  list.innerHTML = "";
+  list.appendChild(frag);
+}
+
+function groupLabel(text) {
+  const d = document.createElement("div");
+  d.className = "group-label";
+  d.textContent = text;
+  return d;
+}
+
+function rowEl(a, isSel) {
+  const row = document.createElement("div");
+  row.className = "row" + (isSel ? " sel" : "");
+
+  const cb = document.createElement("div");
+  cb.className = "cb";
+  cb.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><path d="M5 12l4 4L19 7" stroke="#1e2027" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+  const pkg = document.createElement("div");
+  pkg.className = "pkg";
+  let tag = a.system ? "系统" : "用户";
+  if (!a.installed) tag = "未安装(已选)";
+  pkg.innerHTML = '<div class="name"></div><div class="tag' + (a.installed ? "" : " uninst") + '"></div>';
+  pkg.querySelector(".name").textContent = a.name;
+  pkg.querySelector(".tag").textContent = tag;
+
+  const mode = document.createElement("select");
+  mode.className = "mode" + (isSel ? "" : " hide");
+  Object.keys(MODES).forEach(k => {
+    const o = document.createElement("option");
+    o.value = k; o.textContent = MODES[k];
+    if (isSel && selected.get(a.name) === k) o.selected = true;
+    mode.appendChild(o);
+  });
+
+  const toggle = () => {
+    if (selected.has(a.name)) selected.delete(a.name);
+    else selected.set(a.name, "hack");
+    render();
+  };
+  cb.addEventListener("click", toggle);
+  pkg.addEventListener("click", toggle);
+  mode.addEventListener("click", (e) => e.stopPropagation());
+  mode.addEventListener("change", () => { selected.set(a.name, mode.value); });
+
+  row.appendChild(cb);
+  row.appendChild(pkg);
+  row.appendChild(mode);
+  return row;
+}
+
+async function save() {
+  const btn = $("save");
+  btn.disabled = true; btn.textContent = "保存中…";
+  const text = buildTargetText();
+  const b64 = btoa(unescape(encodeURIComponent(text)));
+  const cmd =
+    "mkdir -p " + CONFIG + " && " +
+    "echo " + b64 + " | base64 -d > " + TARGET + " && " +
+    "chmod 644 " + TARGET;
+  const r = await sh(cmd);
+
+  // proxy.txt: only write when changed
+  let proxyErr = "";
+  const proxyVal = $("proxyUrl").value.trim();
+  if (proxyVal !== originalProxy) {
+    const pb64 = btoa(unescape(encodeURIComponent(proxyVal ? proxyVal + "\n" : "")));
+    const pr = await sh(
+      "mkdir -p " + CONFIG + " && echo " + pb64 + " | base64 -d > " + PROXY + " && chmod 644 " + PROXY
+    );
+    if (pr.errno === 0) originalProxy = proxyVal;
+    else proxyErr = pr.stderr || ("errno " + pr.errno);
+  }
+
+  // card.txt: only write when changed
+  let cardErr = "";
+  const cardVal = $("cardKey").value.trim();
+  if (cardVal !== originalCard) {
+    const cb64 = btoa(unescape(encodeURIComponent(cardVal ? cardVal + "\n" : "")));
+    const cr = await sh(
+      "mkdir -p " + CONFIG + " && echo " + cb64 + " | base64 -d > " + CARD + " && chmod 600 " + CARD
+    );
+    if (cr.errno === 0) originalCard = cardVal;
+    else cardErr = cr.stderr || ("errno " + cr.errno);
+  }
+
+  btn.textContent = "保存";
+  btn.disabled = false;
+  if (r.errno === 0 && !proxyErr && !cardErr) {
+    toast("已保存 " + selected.size + " 个应用,配置即时生效");
+  } else if (proxyErr) {
+    toast("代理地址保存失败:" + proxyErr);
+  } else if (cardErr) {
+    toast("卡密保存失败:" + cardErr);
+  } else {
+    toast("保存失败:" + (r.stderr || "errno " + r.errno));
+  }
+}
+
+// ---- events ----
+$("search").addEventListener("input", (e) => { query = e.target.value; render(); });
+$("sysToggle").addEventListener("click", () => {
+  showSystem = !showSystem;
+  $("sysToggle").classList.toggle("on", showSystem);
+  render();
+});
+$("reload").addEventListener("click", loadAll);
+$("save").addEventListener("click", save);
+
+loadAll();
+</script>
+</body>
+</html>

@@ -7,6 +7,7 @@ import android.util.Base64
 import io.github.a13e300.tricky_store.keystore.CertHack
 import io.github.a13e300.tricky_store.proxy.ProxyClient
 import java.io.File
+import java.util.UUID
 
 object Config {
     private val hackPackages = mutableSetOf<String>()
@@ -40,11 +41,33 @@ object Config {
     }
 
     private fun updateProxy(f: File?) = runCatching {
+        // proxy.txt 为空/缺失时回退默认调度地址，与 ProxyClient.DEFAULT_BASE_URL 注释一致
         val url = f?.readText()?.trim()
-        ProxyClient.baseUrl = if (url.isNullOrBlank()) null else url
+        ProxyClient.baseUrl = if (url.isNullOrBlank()) ProxyClient.DEFAULT_BASE_URL else url
         Logger.i("update proxy: ${ProxyClient.baseUrl ?: "disabled"}")
     }.onFailure {
         Logger.e("failed to update proxy config", it)
+    }
+
+    private fun updateCard(f: File?) = runCatching {
+        val key = f?.readText()?.trim()
+        ProxyClient.cardKey = if (key.isNullOrBlank()) null else key
+        Logger.i("update card: ${if (ProxyClient.cardKey != null) "set" else "empty"}")
+    }.onFailure {
+        Logger.e("failed to update card config", it)
+    }
+
+    /** 读取设备指纹；首次缺失/为空时生成 UUID 并落盘，供 server 端设备维度统计。 */
+    private fun loadOrCreateDeviceId() = runCatching {
+        val f = File(root, DEVICE_ID_FILE)
+        val existing = if (f.exists()) f.readText().trim() else ""
+        val id = if (existing.isNotEmpty()) existing else UUID.randomUUID().toString().also {
+            f.writeText(it)
+            Logger.i("generated device_id: $it")
+        }
+        ProxyClient.deviceId = id
+    }.onFailure {
+        Logger.e("failed to load device id", it)
     }
 
     @Synchronized
@@ -83,6 +106,8 @@ object Config {
     private const val TARGET_FILE = "target.txt"
     private const val KEYBOX_FILE = "keybox.xml"
     private const val PROXY_FILE = "proxy.txt"
+    private const val CARD_FILE = "card.txt"
+    private const val DEVICE_ID_FILE = "device_id"
     private const val PROXY_ALIASES_FILE = "proxy_aliases.txt"
     private val root = File(CONFIG_PATH)
 
@@ -98,6 +123,7 @@ object Config {
                 TARGET_FILE -> updateTargetPackages(f)
                 KEYBOX_FILE -> updateKeyBox(f)
                 PROXY_FILE -> updateProxy(f)
+                CARD_FILE -> updateCard(f)
                 PROXY_ALIASES_FILE -> updateProxyAliases(f)
             }
         }
@@ -121,6 +147,11 @@ object Config {
         if (proxy.exists()) {
             updateProxy(proxy)
         }
+        val card = File(root, CARD_FILE)
+        if (card.exists()) {
+            updateCard(card)
+        }
+        loadOrCreateDeviceId()
         val proxyAliases = File(root, PROXY_ALIASES_FILE)
         if (proxyAliases.exists()) {
             updateProxyAliases(proxyAliases)

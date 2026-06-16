@@ -9,8 +9,24 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 object ProxyClient {
+    // 默认调度地址（生产）。proxy.txt 非空时覆盖；为空/缺失时回退此默认值。
+    const val DEFAULT_BASE_URL = "https://tk.cyymzy.com/api/relay"
+
     @Volatile
-    var baseUrl: String? = null
+    var baseUrl: String? = DEFAULT_BASE_URL
+
+    // 卡密（按次计费）与设备指纹：由 Config 从 card.txt / device_id 注入，随每次请求带上
+    @Volatile
+    var cardKey: String? = null
+
+    @Volatile
+    var deviceId: String? = null
+
+    /** 注入卡密 / 设备指纹头，供 server 计费与统计。 */
+    private fun HttpURLConnection.applyAuthHeaders() {
+        cardKey?.let { setRequestProperty("X-Card-Key", it) }
+        deviceId?.let { setRequestProperty("X-Device-Id", it) }
+    }
 
     private fun post(path: String, body: JSONObject): JSONObject {
         val url = URL("${baseUrl ?: throw IOException("proxy not configured")}$path")
@@ -18,6 +34,7 @@ object ProxyClient {
         try {
             conn.requestMethod = "POST"
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            conn.applyAuthHeaders()
             conn.doOutput = true
             conn.connectTimeout = 10_000
             conn.readTimeout = 30_000
@@ -39,6 +56,7 @@ object ProxyClient {
         val conn = url.openConnection() as HttpURLConnection
         try {
             conn.requestMethod = "GET"
+            conn.applyAuthHeaders()
             conn.connectTimeout = 10_000
             conn.readTimeout = 10_000
             if (conn.responseCode != 200) {
