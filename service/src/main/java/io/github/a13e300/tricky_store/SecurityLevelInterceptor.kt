@@ -132,7 +132,8 @@ class SecurityLevelInterceptor(
             }
             if (strippedIds > 0)
                 Logger.i("stripped $strippedIds non-proxyable attestation tag(s) for uid=$callingUid (ID/unique-ID cannot be attested by a remote device)")
-            val attestKeyAlias = attestationKeyDescriptor?.alias?.let { localAlias ->
+            val attestLocalAlias = attestationKeyDescriptor?.alias
+            val attestKeyAlias = attestLocalAlias?.let { localAlias ->
                 getProxyAlias(callingUid, localAlias).also { proxyAlias ->
                     if (proxyAlias == null) {
                         Logger.i("no proxy alias mapped for attestation key uid=$callingUid alias=$localAlias")
@@ -142,7 +143,7 @@ class SecurityLevelInterceptor(
                 }
             }
 
-            val result = ProxyClient.generate(
+            fun doGenerate(ak: String?) = ProxyClient.generate(
                 targetPackage = packageName,
                 signingCertHash = signingCertHash,
                 signingCert = null,
@@ -151,9 +152,25 @@ class SecurityLevelInterceptor(
                 params = paramEntries,
                 flags = aFlags,
                 entropy = entropy,
-                attestKeyAlias = attestKeyAlias,
+                attestKeyAlias = ak,
                 securityLevel = level
             )
+
+            // 自愈：代理机换机 / 会话过期后，缓存里的 attestKeyAlias 在新机 keystore 已不存在，
+            // 远端出证回 KEY_NOT_FOUND(errorCode=7)。此时把这条悬空缓存作废（内存+文件），并改为
+            // 不带 attest key 重试一次——本次请求直接由代理机自身的 TEE 根出证，不再硬失败 500。
+            // 后续对该别名的请求也不会再复用死映射（getProxyAlias 已返回 null）。
+            var attestKeyUsed = attestKeyAlias != null
+            val result = try {
+                doGenerate(attestKeyAlias)
+            } catch (e: Exception) {
+                if (attestKeyAlias != null && isKeyNotFound(e)) {
+                    Logger.e("proxy attest key alias=$attestKeyAlias gone on remote (stale after agent/session change) uid=$callingUid; evict cache + retry without attest key", e)
+                    removeProxyKey(callingUid, attestLocalAlias)
+                    attestKeyUsed = false
+                    doGenerate(null)
+                } else throw e
+            }
 
             Logger.i("proxy generated key alias=${result.alias} for uid=$callingUid pkg=$packageName")
 
@@ -188,8 +205,7 @@ class SecurityLevelInterceptor(
             // leaf (signed by that attest key) and omits certChain. Rebuild the chain
             // from the attest key's own chain that we cached when it was generated.
             var effectiveChain = result.certChain
-            val attestLocalAlias = attestationKeyDescriptor?.alias
-            if (effectiveChain.isEmpty() && attestLocalAlias != null) {
+            if (effectiveChain.isEmpty() && attestKeyUsed && attestLocalAlias != null) {
                 val attestMeta = proxyAliases[Key(callingUid, attestLocalAlias)]?.response?.metadata
                 val attestLeaf = attestMeta?.certificate
                 if (attestLeaf != null) {
@@ -226,6 +242,16 @@ class SecurityLevelInterceptor(
             Logger.e("proxy key gen failed uid=$callingUid", it)
         }
         return Skip
+    }
+
+    // 远端出证失败是否为 keystore2 KEY_NOT_FOUND(ResponseCode=7)——典型为缓存的 attestKeyAlias
+    // 指向的密钥在代理机已不存在（换机/会话过期）。ProxyClient 把代理机 500 的响应体放进异常
+    // message，里面形如 ServiceSpecificException(errorCode=7)。逐层查 cause 链以防被包裹。
+    private fun isKeyNotFound(t: Throwable): Boolean {
+        val msg = generateSequence(t as Throwable?) { it.cause }
+            .mapNotNull { it.message }
+            .joinToString(" ")
+        return msg.contains("errorCode=7)") || msg.contains("KEY_NOT_FOUND", ignoreCase = true)
     }
 
     private fun handleCreateOperation(callingUid: Int, data: Parcel): Result {
