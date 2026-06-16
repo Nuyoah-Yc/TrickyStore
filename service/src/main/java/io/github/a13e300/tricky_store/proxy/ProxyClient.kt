@@ -115,10 +115,15 @@ object ProxyClient {
         }
         Logger.d("proxy generate: $targetPackage")
         val resp = post("/generate", body)
+        // When an app-supplied attest key is used, the relay may return only the new
+        // leaf and omit certChain (the chain is the attest key's own chain, which the
+        // caller already holds). Tolerate its absence instead of throwing.
+        val certChainStr = resp.optString("certChain", "")
         return GenerateResult(
             alias = resp.getString("alias"),
             leafCert = Base64.decode(resp.getString("leafCert"), Base64.DEFAULT),
-            certChain = Base64.decode(resp.getString("certChain"), Base64.DEFAULT)
+            certChain = if (certChainStr.isEmpty()) ByteArray(0)
+            else Base64.decode(certChainStr, Base64.DEFAULT)
         )
     }
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-TrickyStore is an Android Magisk/KernelSU module that intercepts Android Keystore attestation to spoof device integrity checks (Play Integrity). It works by injecting into the `keystore2` system process, hooking Binder transactions, and replacing or generating attestation certificate chains. Requires Android 12+ (SDK 31).
+TrickyStore is an Android Magisk/KernelSU module that intercepts Android Keystore attestation to spoof device integrity checks (Play Integrity). It works by injecting into the `keystore2` system process, hooking Binder transactions, and forwarding attestation requests to a remote clean device ("proxy-only" architecture). Requires Android 12+ (SDK 31).
 
 ## Build Commands
 
@@ -38,26 +38,26 @@ The build requires: JDK 17, Android SDK 34, NDK 27.0.12077973, CMake 3.28.0+.
 ### Three Gradle Modules
 
 - **`:module`** — Native C++ code (Binder interception, process injection, Zygisk). Produces the Magisk module ZIP containing native `.so` libraries, shell scripts, and the service APK.
-- **`:service`** — Kotlin/Java background daemon APK. Runs as root, intercepts keystore operations, and performs certificate hacking/generation using BouncyCastle.
+- **`:service`** — Kotlin/Java background daemon APK. Runs as root, intercepts keystore operations, and forwards attestation to a remote proxy relay (`ProxyClient`).
 - **`:stub`** — Compile-only stubs for Android internal APIs (`android.system.keystore2.*`, `android.hardware.security.keymint.*`, `ServiceManager`, `SystemProperties`, `IPackageManager`) that are not in the public SDK.
 
 ### Data Flow
 
 1. **Injection**: `libinject.so` ptrace-attaches to the `keystore2` process and loads `libtricky_store.so` via dlopen
 2. **Binder Hooking**: `binder_interceptor.cpp` replaces the `BBinder` for `IKeystoreSecurityLevel` (TEE/StrongBox), intercepting `getKeyEntry()` and `generateKey()` transactions
-3. **Service Coordination**: The Java/Kotlin service (`KeystoreInterceptor.kt`) registers interceptors and delegates to `CertHack.java` for certificate manipulation
-4. **Certificate Modes**: Per-package config in `target.txt` — default "hack" mode patches the leaf cert; `!` suffix triggers full certificate chain generation from `keybox.xml`
+3. **Service Coordination**: The Java/Kotlin service (`KeystoreInterceptor.kt` / `SecurityLevelInterceptor.kt`) registers interceptors and forwards `generateKey()`/`createOperation()` to the remote proxy
+4. **Proxy Forwarding**: Every package listed in `target.txt` is forwarded to a remote clean device via `ProxyClient`, which returns a genuine attestation chain. There is no local certificate hacking or generation, and no `keybox.xml`.
 5. **Zygisk** (optional): `libtszygisk.so` hooks app process startup to spoof `Build.*` fields from `/data/adb/tricky_store/spoof_build_vars`
 
 ### Key Source Files
 
 **Service (Kotlin/Java):**
 - `service/.../Main.kt` — Entry point; verifies module integrity via SHA-256 checksum of `module.prop`
-- `service/.../KeystoreInterceptor.kt` — Registers Binder interceptors for TEE and StrongBox security levels
-- `service/.../SecurityLevelInterceptor.kt` — Intercepts `generateKey()` for cert-generation mode packages
-- `service/.../Config.kt` — FileObserver-based hot-reload of `target.txt` and `keybox.xml` from `/data/adb/tricky_store/`
-- `service/.../keystore/CertHack.java` — Core logic: X.509 cert chain creation, ASN.1 attestation extensions, ECDSA/RSA key generation
-- `service/.../keystore/XMLParser.java` — Custom parser for keybox.xml (XPath-like indexed tag access)
+- `service/.../KeystoreInterceptor.kt` — Registers Binder interceptors; serves cached proxy responses for `getKeyEntry()` and forwards `deleteKey()`
+- `service/.../SecurityLevelInterceptor.kt` — Intercepts `generateKey()`/`createOperation()` and forwards them to the proxy
+- `service/.../Config.kt` — FileObserver-based hot-reload of `target.txt`, `proxy.txt`, `card.txt` from `/data/adb/tricky_store/`
+- `service/.../proxy/ProxyClient.kt` — HTTP client for the remote relay (generate/operation/update/finish/delete)
+- `service/.../proxy/ProxyOperationBinder.kt` — Binder that proxies a keystore crypto operation to the remote device
 
 **Native C++:**
 - `module/src/main/cpp/binder_interceptor.cpp` — BBinder subclass for pre/post Binder transaction hooking
@@ -78,6 +78,7 @@ The service APK build (`service/build.gradle.kts`) computes a SHA-256 checksum f
 ### Runtime Configuration
 
 All config lives at `/data/adb/tricky_store/` on device and hot-reloads without reboot:
-- `target.txt` — Package names to intercept (append `!` for cert-generation mode)
-- `keybox.xml` — Private keys + certificate chains in Android keybox XML format
+- `target.txt` — Package names to intercept (one per line; legacy `@`/`!` suffixes are stripped/ignored)
+- `proxy.txt` — Proxy relay base URL (falls back to the built-in default if absent/empty)
+- `card.txt` — Optional billing card key sent with each proxy request
 - `spoof_build_vars` — Key=value pairs for Build.* field spoofing (requires Zygisk)

@@ -5,40 +5,21 @@ A trick of keystore. **Android 12 or above is required**.
 ## Usage
 
 1. Flash this module and reboot.  
-2. For more than DEVICE integrity, put an unrevoked hardware keybox.xml at `/data/adb/tricky_store/keybox.xml` (Optional).  
-3. Customize target packages at `/data/adb/tricky_store/target.txt` (Optional).  
+2. Customize target packages at `/data/adb/tricky_store/target.txt` (Optional).  
+3. (Optional) Override the proxy relay endpoint at `/data/adb/tricky_store/proxy.txt`.  
 4. Enjoy!  
 
 **All configuration files will take effect immediately.**
 
-## keybox.xml
+## Proxy-only architecture
 
-format:
+This build no longer performs any local certificate hacking or generation, and therefore
+**does not use `keybox.xml`**. Every package listed in `target.txt` has its keystore
+attestation forwarded to a remote clean device through the proxy relay, which returns a
+genuine hardware-backed attestation chain.
 
-```xml
-<?xml version="1.0"?>
-<AndroidAttestation>
-    <NumberOfKeyboxes>1</NumberOfKeyboxes>
-    <Keybox DeviceID="...">
-        <Key algorithm="ecdsa|rsa">
-            <PrivateKey format="pem">
------BEGIN EC PRIVATE KEY-----
-...
------END EC PRIVATE KEY-----
-            </PrivateKey>
-            <CertificateChain>
-                <NumberOfCertificates>...</NumberOfCertificates>
-                    <Certificate format="pem">
------BEGIN CERTIFICATE-----
-...
------END CERTIFICATE-----
-                    </Certificate>
-                ... more certificates
-            </CertificateChain>
-        </Key>...
-    </Keybox>
-</AndroidAttestation>
-```
+- `proxy.txt` — relay base URL. If absent/empty the built-in default endpoint is used.
+- `card.txt` — optional billing card key sent with each request.
 
 ## Build Vars Spoofing
 
@@ -70,23 +51,23 @@ folder `/data/adb/modules/tricky_store/zygisk` manually.
 
 ## Support TEE broken devices
 
-Tricky Store will hack the leaf certificate by default. On TEE broken devices, this will not work because we can't retrieve the leaf certificate from TEE. You can add a `!` after a package name to enable generate certificate support for this package.
+TEE-broken devices are supported out of the box: since attestation is forwarded to a
+remote clean device, no working local TEE/StrongBox attestation key is required. Just list
+the package in `target.txt`.
 
 For example:
 
 ```
 # target.txt
-# use leaf certificate hacking mode for KeyAttestation App
 io.github.vvb2060.keyattestation
-# use certificate generating mode for gms
-com.google.android.gms!
+com.google.android.gms
 ```
+
+Legacy `@` / `!` suffixes are accepted but ignored — every listed package goes through proxy.
 
 ## TODO
 
-- Support App Attest Key.
 - [Support Android 11 and below.](https://github.com/5ec1cff/TrickyStore/issues/25#issuecomment-2250588463)
-- Support automatic selection mode.
 
 PR is welcomed.
 

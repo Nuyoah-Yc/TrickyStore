@@ -4,40 +4,27 @@ import android.content.pm.IPackageManager
 import android.os.FileObserver
 import android.os.ServiceManager
 import android.util.Base64
-import io.github.a13e300.tricky_store.keystore.CertHack
 import io.github.a13e300.tricky_store.proxy.ProxyClient
 import java.io.File
 import java.util.UUID
 
 object Config {
-    private val hackPackages = mutableSetOf<String>()
-    private val generatePackages = mutableSetOf<String>()
     private val proxyPackages = mutableSetOf<String>()
     private val proxyAliases = mutableMapOf<String, String>()
 
     private fun updateTargetPackages(f: File?) = runCatching {
-        hackPackages.clear()
-        generatePackages.clear()
+        // proxy-only：target.txt 里列出的每个包都转发到远程 proxy 认证。
+        // 兼容历史写法，去掉旧的 @ / ! 后缀（不再有语义区别）。
         proxyPackages.clear()
         f?.readLines()?.forEach {
             if (it.isNotBlank() && !it.startsWith("#")) {
-                val n = it.trim()
-                when {
-                    n.endsWith("@") -> proxyPackages.add(n.removeSuffix("@").trim())
-                    n.endsWith("!") -> generatePackages.add(n.removeSuffix("!").trim())
-                    else -> hackPackages.add(n)
-                }
+                val n = it.trim().removeSuffix("@").removeSuffix("!").trim()
+                if (n.isNotEmpty()) proxyPackages.add(n)
             }
         }
-        Logger.i("update hack packages: $hackPackages, generate packages=$generatePackages, proxy packages=$proxyPackages")
+        Logger.i("update proxy packages: $proxyPackages")
     }.onFailure {
         Logger.e("failed to update target files", it)
-    }
-
-    private fun updateKeyBox(f: File?) = runCatching {
-        CertHack.readFromXml(f?.readText())
-    }.onFailure {
-        Logger.e("failed to update keybox", it)
     }
 
     private fun updateProxy(f: File?) = runCatching {
@@ -104,7 +91,6 @@ object Config {
 
     private const val CONFIG_PATH = "/data/adb/tricky_store"
     private const val TARGET_FILE = "target.txt"
-    private const val KEYBOX_FILE = "keybox.xml"
     private const val PROXY_FILE = "proxy.txt"
     private const val CARD_FILE = "card.txt"
     private const val DEVICE_ID_FILE = "device_id"
@@ -121,7 +107,6 @@ object Config {
             }
             when (path) {
                 TARGET_FILE -> updateTargetPackages(f)
-                KEYBOX_FILE -> updateKeyBox(f)
                 PROXY_FILE -> updateProxy(f)
                 CARD_FILE -> updateCard(f)
                 PROXY_ALIASES_FILE -> updateProxyAliases(f)
@@ -136,12 +121,6 @@ object Config {
             updateTargetPackages(scope)
         } else {
             Logger.e("target.txt file not found, please put it to $scope !")
-        }
-        val keybox = File(root, KEYBOX_FILE)
-        if (!keybox.exists()) {
-            Logger.e("keybox file not found, please put it to $keybox !")
-        } else {
-            updateKeyBox(keybox)
         }
         val proxy = File(root, PROXY_FILE)
         if (proxy.exists()) {
@@ -167,18 +146,6 @@ object Config {
         }
         return iPm
     }
-
-    fun needHack(callingUid: Int) = kotlin.runCatching {
-        if (hackPackages.isEmpty()) return false
-        val ps = getPm()?.getPackagesForUid(callingUid)
-        ps?.any { it in hackPackages }
-    }.onFailure { Logger.e("failed to get packages", it) }.getOrNull() ?: false
-
-    fun needGenerate(callingUid: Int) = kotlin.runCatching {
-        if (generatePackages.isEmpty()) return false
-        val ps = getPm()?.getPackagesForUid(callingUid)
-        ps?.any { it in generatePackages }
-    }.onFailure { Logger.e("failed to get packages", it) }.getOrNull() ?: false
 
     fun needProxy(callingUid: Int) = kotlin.runCatching {
         if (proxyPackages.isEmpty() || ProxyClient.baseUrl == null) return false

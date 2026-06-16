@@ -12,14 +12,8 @@ import android.system.keystore2.KeyDescriptor
 import android.system.keystore2.KeyEntryResponse
 import android.system.keystore2.KeyMetadata
 import io.github.a13e300.tricky_store.binder.BinderInterceptor
-import io.github.a13e300.tricky_store.keystore.CertHack
-import io.github.a13e300.tricky_store.keystore.CertHack.KeyGenParameters
-import io.github.a13e300.tricky_store.keystore.Utils
 import io.github.a13e300.tricky_store.proxy.ProxyClient
 import io.github.a13e300.tricky_store.proxy.ProxyOperationBinder
-import java.security.KeyPair
-import java.security.MessageDigest
-import java.security.cert.Certificate
 import java.util.concurrent.ConcurrentHashMap
 
 class SecurityLevelInterceptor(
@@ -32,12 +26,8 @@ class SecurityLevelInterceptor(
         private val createOperationTransaction by lazy {
             getTransactCode(IKeystoreSecurityLevel.Stub::class.java, "createOperation")
         }
-        private val keys = ConcurrentHashMap<Key, Info>()
         // Maps local key alias → proxy alias for proxy-generated keys
         private val proxyAliases = ConcurrentHashMap<Key, ProxyKeyInfo>()
-
-        fun getKeyResponse(uid: Int, alias: String): KeyEntryResponse? =
-            keys[Key(uid, alias)]?.response
 
         fun getProxyKeyResponse(uid: Int, alias: String): KeyEntryResponse? =
             proxyAliases[Key(uid, alias)]?.response
@@ -56,7 +46,6 @@ class SecurityLevelInterceptor(
     }
 
     data class Key(val uid: Int, val alias: String)
-    data class Info(val keyPair: KeyPair, val response: KeyEntryResponse)
     data class ProxyKeyInfo(val proxyAlias: String, val response: KeyEntryResponse)
 
     override fun onPreTransact(
@@ -68,12 +57,8 @@ class SecurityLevelInterceptor(
         data: Parcel
     ): Result {
         if (code == generateKeyTransaction) {
-            // Proxy mode takes priority
             if (Config.needProxy(callingUid)) {
                 return handleProxyGenerateKey(callingUid, callingPid, data)
-            }
-            if (Config.needGenerate(callingUid)) {
-                return handleLocalGenerateKey(callingUid, callingPid, data)
             }
         }
         if (code == createOperationTransaction) {
@@ -181,11 +166,26 @@ class SecurityLevelInterceptor(
                     }
                 }
             }
-            // Pass the raw certChain bytes through untouched.
+            // When an app-supplied attest key is used, the relay returns only the new
+            // leaf (signed by that attest key) and omits certChain. Rebuild the chain
+            // from the attest key's own chain that we cached when it was generated.
+            var effectiveChain = result.certChain
+            val attestLocalAlias = attestationKeyDescriptor?.alias
+            if (effectiveChain.isEmpty() && attestLocalAlias != null) {
+                val attestMeta = proxyAliases[Key(callingUid, attestLocalAlias)]?.response?.metadata
+                val attestLeaf = attestMeta?.certificate
+                if (attestLeaf != null) {
+                    val attestRest = attestMeta.certificateChain ?: ByteArray(0)
+                    effectiveChain = attestLeaf + attestRest
+                    Logger.i("rebuilt certChain from attest key (${attestLeaf.size}+${attestRest.size} bytes) for uid=$callingUid")
+                } else {
+                    Logger.e("attest key chain not cached for uid=$callingUid alias=$attestLocalAlias; certChain stays empty")
+                }
+            }
             val metadata = KeyMetadata()
             metadata.keySecurityLevel = level
             metadata.certificate = result.leafCert
-            metadata.certificateChain = result.certChain
+            metadata.certificateChain = effectiveChain
             val d = KeyDescriptor()
             d.domain = keyDescriptor.domain
             d.nspace = keyDescriptor.nspace
@@ -206,35 +206,6 @@ class SecurityLevelInterceptor(
             return OverrideReply(0, p)
         }.onFailure {
             Logger.e("proxy key gen failed uid=$callingUid", it)
-        }
-        return Skip
-    }
-
-    private fun handleLocalGenerateKey(callingUid: Int, callingPid: Int, data: Parcel): Result {
-        Logger.i("intercept key gen uid=$callingUid pid=$callingPid")
-        kotlin.runCatching {
-            data.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR)
-            val keyDescriptor =
-                data.readTypedObject(KeyDescriptor.CREATOR) ?: return@runCatching
-            val attestationKeyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)
-            val params = data.createTypedArray(KeyParameter.CREATOR)!!
-            val kgp = KeyGenParameters(params)
-            if (kgp.attestationChallenge != null) {
-                if (attestationKeyDescriptor != null) {
-                    Logger.e("warn: attestation key not supported now")
-                } else {
-                    val pair = CertHack.generateKeyPair(callingUid, keyDescriptor, kgp)
-                        ?: return@runCatching
-                    val response = buildResponse(pair.second, kgp, keyDescriptor)
-                    keys[Key(callingUid, keyDescriptor.alias)] = Info(pair.first, response)
-                    val p = Parcel.obtain()
-                    p.writeNoException()
-                    p.writeTypedObject(response.metadata, 0)
-                    return OverrideReply(0, p)
-                }
-            }
-        }.onFailure {
-            Logger.e("parse key gen request", it)
         }
         return Skip
     }
@@ -351,66 +322,5 @@ class SecurityLevelInterceptor(
             authorizations.add(a)
         }
         return authorizations.toTypedArray()
-    }
-
-    private fun buildResponse(
-        chain: List<Certificate>,
-        params: KeyGenParameters,
-        descriptor: KeyDescriptor
-    ): KeyEntryResponse {
-        val response = KeyEntryResponse()
-        val metadata = KeyMetadata()
-        metadata.keySecurityLevel = level
-        Utils.putCertificateChain(metadata, chain.toTypedArray<Certificate>())
-        val d = KeyDescriptor()
-        d.domain = descriptor.domain
-        d.nspace = descriptor.nspace
-        metadata.key = d
-        val authorizations = ArrayList<Authorization>()
-        var a: Authorization
-        for (i in params.purpose) {
-            a = Authorization()
-            a.keyParameter = KeyParameter()
-            a.keyParameter.tag = Tag.PURPOSE
-            a.keyParameter.value = KeyParameterValue.keyPurpose(i)
-            a.securityLevel = level
-            authorizations.add(a)
-        }
-        for (i in params.digest) {
-            a = Authorization()
-            a.keyParameter = KeyParameter()
-            a.keyParameter.tag = Tag.DIGEST
-            a.keyParameter.value = KeyParameterValue.digest(i)
-            a.securityLevel = level
-            authorizations.add(a)
-        }
-        a = Authorization()
-        a.keyParameter = KeyParameter()
-        a.keyParameter.tag = Tag.ALGORITHM
-        a.keyParameter.value = KeyParameterValue.algorithm(params.algorithm)
-        a.securityLevel = level
-        authorizations.add(a)
-        a = Authorization()
-        a.keyParameter = KeyParameter()
-        a.keyParameter.tag = Tag.KEY_SIZE
-        a.keyParameter.value = KeyParameterValue.integer(params.keySize)
-        a.securityLevel = level
-        authorizations.add(a)
-        a = Authorization()
-        a.keyParameter = KeyParameter()
-        a.keyParameter.tag = Tag.EC_CURVE
-        a.keyParameter.value = KeyParameterValue.ecCurve(params.ecCurve)
-        a.securityLevel = level
-        authorizations.add(a)
-        a = Authorization()
-        a.keyParameter = KeyParameter()
-        a.keyParameter.tag = Tag.NO_AUTH_REQUIRED
-        a.keyParameter.value = KeyParameterValue.boolValue(true)
-        a.securityLevel = level
-        authorizations.add(a)
-        metadata.authorizations = authorizations.toTypedArray<Authorization>()
-        response.metadata = metadata
-        response.iSecurityLevel = original
-        return response
     }
 }
