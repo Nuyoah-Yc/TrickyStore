@@ -201,21 +201,13 @@ class SecurityLevelInterceptor(
                     }
                 }
             }
-            // When an app-supplied attest key is used, the relay returns only the new
-            // leaf (signed by that attest key) and omits certChain. Rebuild the chain
-            // from the attest key's own chain that we cached when it was generated.
-            var effectiveChain = result.certChain
-            if (effectiveChain.isEmpty() && attestKeyUsed && attestLocalAlias != null) {
-                val attestMeta = proxyAliases[Key(callingUid, attestLocalAlias)]?.response?.metadata
-                val attestLeaf = attestMeta?.certificate
-                if (attestLeaf != null) {
-                    val attestRest = attestMeta.certificateChain ?: ByteArray(0)
-                    effectiveChain = attestLeaf + attestRest
-                    Logger.i("rebuilt certChain from attest key (${attestLeaf.size}+${attestRest.size} bytes) for uid=$callingUid")
-                } else {
-                    Logger.e("attest key chain not cached for uid=$callingUid alias=$attestLocalAlias; certChain stays empty")
-                }
-            }
+            // Pass through exactly what the relay (real keystore2) returned. For an
+            // app-supplied attest key, real keystore2 returns ONLY the leaf cert (signed
+            // by the attest key) with an empty chain — the caller already holds the attest
+            // key's own chain and assembles the full path itself. Do NOT pre-append the
+            // attest key's chain here: the app then concatenates it a second time, which
+            // produces duplicate certs and makes CertPath validation fail ("证书链不受信任").
+            val effectiveChain = result.certChain
             val metadata = KeyMetadata()
             metadata.keySecurityLevel = level
             metadata.certificate = result.leafCert
