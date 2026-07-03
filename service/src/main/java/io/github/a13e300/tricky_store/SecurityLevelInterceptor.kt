@@ -160,14 +160,12 @@ class SecurityLevelInterceptor(
             // 远端出证回 KEY_NOT_FOUND(errorCode=7)。此时把这条悬空缓存作废（内存+文件），并改为
             // 不带 attest key 重试一次——本次请求直接由代理机自身的 TEE 根出证，不再硬失败 500。
             // 后续对该别名的请求也不会再复用死映射（getProxyAlias 已返回 null）。
-            var attestKeyUsed = attestKeyAlias != null
             val result = try {
                 doGenerate(attestKeyAlias)
             } catch (e: Exception) {
                 if (attestKeyAlias != null && isKeyNotFound(e)) {
                     Logger.e("proxy attest key alias=$attestKeyAlias gone on remote (stale after agent/session change) uid=$callingUid; evict cache + retry without attest key", e)
                     removeProxyKey(callingUid, attestLocalAlias)
-                    attestKeyUsed = false
                     doGenerate(null)
                 } else throw e
             }
@@ -262,7 +260,20 @@ class SecurityLevelInterceptor(
             Logger.i("intercept createOperation for proxy key uid=$callingUid alias=$alias")
 
             val paramEntries = params.mapNotNull { keyParamToEntry(it) }
-            val opId = ProxyClient.createOperation(proxyInfo.proxyAlias, paramEntries)
+            // 与 generate 不同：createOperation 操作的是一把已出证的既有代理密钥，无法就地重建
+            // （重建会得到不同密钥/证书，作废 app 已拿到的出证）。若远端回 KEY_NOT_FOUND，说明该
+            // 代理密钥在代理机已消失（代理机重启 / 清过 keystore / 路由到没有它的机）。把这条悬空
+            // 映射作废（内存+文件），让本次操作干净失败——app 下次 generateKey 会生成全新代理密钥，
+            // 不再复用死别名。
+            val opId = try {
+                ProxyClient.createOperation(proxyInfo.proxyAlias, paramEntries)
+            } catch (e: Exception) {
+                if (isKeyNotFound(e)) {
+                    Logger.e("proxy operation key alias=${proxyInfo.proxyAlias} gone on remote (stale after agent/session change) uid=$callingUid alias=$alias; evict cache", e)
+                    removeProxyKey(callingUid, alias)
+                }
+                throw e
+            }
 
             Logger.i("proxy operation created opId=$opId")
 
