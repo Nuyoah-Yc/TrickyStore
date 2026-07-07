@@ -34,6 +34,13 @@
 com.google.android.gms
 io.github.vvb2060.keyattestation
 ```
+当前已完成高达12万次签发认证
+<img width="1666" height="802" alt="image" src="https://github.com/user-attachments/assets/860af899-f57a-41c9-8799-b45bd6f7021b" />
+<img width="346" height="770" alt="image" src="https://github.com/user-attachments/assets/900f762d-492e-4979-8546-407319e3993e" /><img width="345" height="768" alt="image" src="https://github.com/user-attachments/assets/d32973a0-b484-4ade-98be-17cd3b150874" />
+
+
+
+
 
 ## 致谢
 
