@@ -205,6 +205,6 @@ POST /delete     → 删除密钥
 
 ## 4. 设备端行为备注（供远端实现参考）
 
-- **alias 持久化**：`/generate` 返回的 `alias` 会被设备端保存在 `proxy_aliases.txt`（映射「本地 uid+alias → 远端 alias」），重启后用于 `attestKeyAlias` 的链式认证。**因此同一把远端密钥可能被多次按 alias 引用，远端需长期保留该密钥，直到收到 `/delete`。**
-- **当前实现的已知缺口**：`createOperation` 拦截目前只查设备端**内存**映射，未从 `proxy_aliases.txt` 回退；keystore2 进程重启后，旧密钥的 operation 路径会暂时失效（直到下次重新 generate）。远端无需为此特殊处理。
+- **alias 生命周期（不持久化，每次都签新证书）**：`/generate` 返回的 `alias` 仅保存在设备端**内存**（映射「本地 uid+alias → 远端 alias」），仅供**同一会话内**的 `createOperation` / `deleteKey` / 链式 `attestKeyAlias` 引用。设备端**不再落盘**（已移除 `proxy_aliases.txt`）：keystore2 进程或设备重启后映射即丢失，App 下次 `generateKey` 会重新走 `/generate` 出全新证书，**不复用旧密钥/证书**。
+- **远端密钥保留**：远端至少需在当前会话内保留 `/generate` 出的密钥（直到收到 `/delete`）。设备端重启后不会再按旧 alias 引用它，远端可按自身策略回收陈旧密钥。
 - **未使用的 GET 帮助方法**：`ProxyClient` 中存在一个 `get()` 私有方法，但当前 6 个接口全为 POST，无 GET 调用方。远端无需实现任何 GET 接口。

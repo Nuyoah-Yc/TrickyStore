@@ -3,14 +3,12 @@ package io.github.a13e300.tricky_store
 import android.content.pm.IPackageManager
 import android.os.FileObserver
 import android.os.ServiceManager
-import android.util.Base64
 import io.github.a13e300.tricky_store.proxy.ProxyClient
 import java.io.File
 import java.util.UUID
 
 object Config {
     private val proxyPackages = mutableSetOf<String>()
-    private val proxyAliases = mutableMapOf<String, String>()
 
     private fun updateTargetPackages(f: File?) = runCatching {
         // proxy-only：target.txt 里列出的每个包都转发到远程 proxy 认证。
@@ -57,44 +55,11 @@ object Config {
         Logger.e("failed to load device id", it)
     }
 
-    @Synchronized
-    private fun updateProxyAliases(f: File?) = runCatching {
-        proxyAliases.clear()
-        f?.readLines()?.forEach {
-            val line = it.trim()
-            if (line.isBlank() || line.startsWith("#")) return@forEach
-            val idx = line.lastIndexOf('=')
-            if (idx <= 0) return@forEach
-            val key = line.substring(0, idx).trim()
-            val value = line.substring(idx + 1).trim()
-            if (key.isNotEmpty() && value.isNotEmpty()) proxyAliases[key] = value
-        }
-        Logger.i("update proxy aliases: ${proxyAliases.size} entries")
-    }.onFailure {
-        Logger.e("failed to update proxy aliases", it)
-    }
-
-    @Synchronized
-    private fun writeProxyAliases() = runCatching {
-        val body = proxyAliases.entries
-            .sortedBy { it.key }
-            .joinToString("\n") { (key, value) -> "$key=$value" }
-        File(root, PROXY_ALIASES_FILE).writeText(if (body.isEmpty()) "" else "$body\n")
-    }.onFailure {
-        Logger.e("failed to write proxy aliases", it)
-    }
-
-    private fun proxyAliasKey(uid: Int, alias: String): String {
-        val encodedAlias = Base64.encodeToString(alias.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-        return "$uid:$encodedAlias"
-    }
-
     private const val CONFIG_PATH = "/data/adb/tricky_store"
     private const val TARGET_FILE = "target.txt"
     private const val PROXY_FILE = "proxy.txt"
     private const val CARD_FILE = "card.txt"
     private const val DEVICE_ID_FILE = "device_id"
-    private const val PROXY_ALIASES_FILE = "proxy_aliases.txt"
     private val root = File(CONFIG_PATH)
 
     object ConfigObserver : FileObserver(root, CLOSE_WRITE or DELETE or MOVED_FROM or MOVED_TO) {
@@ -109,7 +74,6 @@ object Config {
                 TARGET_FILE -> updateTargetPackages(f)
                 PROXY_FILE -> updateProxy(f)
                 CARD_FILE -> updateCard(f)
-                PROXY_ALIASES_FILE -> updateProxyAliases(f)
             }
         }
     }
@@ -131,10 +95,6 @@ object Config {
             updateCard(card)
         }
         loadOrCreateDeviceId()
-        val proxyAliases = File(root, PROXY_ALIASES_FILE)
-        if (proxyAliases.exists()) {
-            updateProxyAliases(proxyAliases)
-        }
         ConfigObserver.startWatching()
     }
 
@@ -157,21 +117,4 @@ object Config {
         val ps = getPm()?.getPackagesForUid(callingUid) ?: return null
         ps.firstOrNull { it in proxyPackages }
     }.getOrNull()
-
-    @Synchronized
-    fun getProxyAlias(uid: Int, alias: String): String? = proxyAliases[proxyAliasKey(uid, alias)]
-
-    @Synchronized
-    fun putProxyAlias(uid: Int, alias: String, proxyAlias: String) {
-        proxyAliases[proxyAliasKey(uid, alias)] = proxyAlias
-        writeProxyAliases()
-        Logger.i("save proxy alias uid=$uid alias=$alias proxyAlias=$proxyAlias")
-    }
-
-    @Synchronized
-    fun removeProxyAlias(uid: Int, alias: String): Boolean {
-        val removed = proxyAliases.remove(proxyAliasKey(uid, alias)) != null
-        if (removed) writeProxyAliases()
-        return removed
-    }
 }

@@ -26,7 +26,12 @@ class SecurityLevelInterceptor(
         private val createOperationTransaction by lazy {
             getTransactCode(IKeystoreSecurityLevel.Stub::class.java, "createOperation")
         }
-        // Maps local key alias → proxy alias for proxy-generated keys
+        // Maps local key alias → proxy alias for proxy-generated keys.
+        // In-memory only (per keystore2 process lifetime): NOT persisted to disk, so the
+        // mapping is dropped on daemon/device restart. Nothing is reused across sessions —
+        // every generateKey signs a fresh cert on the remote. It exists purely to serve the
+        // in-session key lifecycle (getKeyEntry read-back, createOperation, deleteKey, and
+        // an app-supplied attestKeyAlias generated earlier in the same session).
         private val proxyAliases = ConcurrentHashMap<Key, ProxyKeyInfo>()
 
         // Tags a remote device cannot satisfy on behalf of this device:
@@ -43,17 +48,11 @@ class SecurityLevelInterceptor(
         fun getProxyKeyResponse(uid: Int, alias: String): KeyEntryResponse? =
             proxyAliases[Key(uid, alias)]?.response
 
-        fun isProxyKey(uid: Int, alias: String): Boolean =
-            proxyAliases.containsKey(Key(uid, alias)) || Config.getProxyAlias(uid, alias) != null
-
-        fun removeProxyKey(uid: Int, alias: String): Boolean {
-            val removedMemory = proxyAliases.remove(Key(uid, alias)) != null
-            val removedPersisted = Config.removeProxyAlias(uid, alias)
-            return removedMemory || removedPersisted
-        }
+        fun removeProxyKey(uid: Int, alias: String): Boolean =
+            proxyAliases.remove(Key(uid, alias)) != null
 
         fun getProxyAlias(uid: Int, alias: String): String? =
-            proxyAliases[Key(uid, alias)]?.proxyAlias ?: Config.getProxyAlias(uid, alias)
+            proxyAliases[Key(uid, alias)]?.proxyAlias
     }
 
     data class Key(val uid: Int, val alias: String)
@@ -156,8 +155,8 @@ class SecurityLevelInterceptor(
                 securityLevel = level
             )
 
-            // 自愈：代理机换机 / 会话过期后，缓存里的 attestKeyAlias 在新机 keystore 已不存在，
-            // 远端出证回 KEY_NOT_FOUND(errorCode=7)。此时把这条悬空缓存作废（内存+文件），并改为
+            // 自愈：代理机换机 / 会话过期后，内存映射里的 attestKeyAlias 在新机 keystore 已不存在，
+            // 远端出证回 KEY_NOT_FOUND(errorCode=7)。此时把这条悬空内存映射作废，并改为
             // 不带 attest key 重试一次——本次请求直接由代理机自身的 TEE 根出证，不再硬失败 500。
             // 后续对该别名的请求也不会再复用死映射（getProxyAlias 已返回 null）。
             val result = try {
@@ -222,7 +221,6 @@ class SecurityLevelInterceptor(
 
             proxyAliases[Key(callingUid, keyDescriptor.alias)] =
                 ProxyKeyInfo(result.alias, response)
-            Config.putProxyAlias(callingUid, keyDescriptor.alias, result.alias)
 
             val p = Parcel.obtain()
             p.writeNoException()
@@ -263,7 +261,7 @@ class SecurityLevelInterceptor(
             // 与 generate 不同：createOperation 操作的是一把已出证的既有代理密钥，无法就地重建
             // （重建会得到不同密钥/证书，作废 app 已拿到的出证）。若远端回 KEY_NOT_FOUND，说明该
             // 代理密钥在代理机已消失（代理机重启 / 清过 keystore / 路由到没有它的机）。把这条悬空
-            // 映射作废（内存+文件），让本次操作干净失败——app 下次 generateKey 会生成全新代理密钥，
+            // 内存映射作废，让本次操作干净失败——app 下次 generateKey 会生成全新代理密钥，
             // 不再复用死别名。
             val opId = try {
                 ProxyClient.createOperation(proxyInfo.proxyAlias, paramEntries)
