@@ -1,97 +1,42 @@
-# Tricky Store
+# Tricky Store（远程转发 TEE 版）
 
-A trick of keystore. **Android 12 or above is required**.
+基于 [Tricky Store](https://github.com/5ec1cff/TrickyStore) 魔改的**远程转发 TEE**方案：本机不再需要可用的 TEE/StrongBox，把 Keystore 认证转发到远端干净设备出证，**稳过 Play Integrity 三层（STRONG / DEVICE / BASIC）**。
 
-## Usage
+**支持范围**：Android 12 ~ Android 17；Magisk、SukiSU Ultra、定制 ROM、虚拟机、云机模拟器等。
 
-1. Flash this module and reboot.  
-2. Customize target packages at `/data/adb/tricky_store/target.txt` (Optional).  
-3. (Optional) Override the proxy relay endpoint at `/data/adb/tricky_store/proxy.txt`.  
-4. Enjoy!  
-
-**All configuration files will take effect immediately.**
-
-## Proxy-only architecture
-
-This build no longer performs any local certificate hacking or generation, and therefore
-**does not use `keybox.xml`**. Every package listed in `target.txt` has its keystore
-attestation forwarded to a remote clean device through the proxy relay, which returns a
-genuine hardware-backed attestation chain.
-
-- `proxy.txt` — relay base URL. If absent/empty the built-in default endpoint is used.
-- `card.txt` — optional billing card key sent with each request.
-
-## Build Vars Spoofing
-
-> **Zygisk (or Zygisk Next) is needed for this feature to work.**
-
-If you still do not pass you can try enabling/disabling Build variable spoofing by creating/deleting the file `/data/adb/tricky_store/spoof_build_vars`.
-
-Tricky Store will automatically generate example config props inside `/data/adb/tricky_store/spoof_build_vars` once created, on next reboot, then you may manually edit your spoof config.
-
-Here is an example of a spoof config:
+## 免费测试卡密
 
 ```
-MANUFACTURER=Google
-MODEL=Pixel 8 Pro
-FINGERPRINT=google/husky_beta/husky:15/AP31.240617.009/12094726:user/release-keys
-BRAND=google
-PRODUCT=husky_beta
-DEVICE=husky
-RELEASE=15
-ID=AP31.240617.009
-INCREMENTAL=12094726
-TYPE=user
-TAGS=release-keys
-SECURITY_PATCH=2024-07-05
+2WWPJLDLUPAJBUM5WV49
 ```
 
-### Native property spoofing (PlayIntegrityFix-style)
+此卡密可直接**免费使用 / 压测**，填入下方 `card.txt` 即可。
 
-In addition to spoofing the Java `android.os.Build` / `Build.VERSION` fields, the Zygisk module
-now also hooks libc's `__system_property_read_callback` (via LSPlt) inside the target/GMS
-processes, so native `ro.*` reads stay consistent with the spoofed Build fields. The values are
-derived from the **same `spoof_build_vars`** file — no extra config:
+## 使用
 
-- properties ending with `api_level`        → `DEVICE_INITIAL_SDK_INT`
-- properties ending with `.security_patch`   → `SECURITY_PATCH`
-- properties ending with `.build.id`         → `ID`
-- `init.svc.adbd` → `stopped`, `sys.usb.state` → `mtp`
+1. Magisk / SukiSU Ultra 刷入模块 ZIP，重启。
+2. 在 KernelSU / SukiSU / Magisk 管理器打开本模块 WebUI，勾选要过检的应用、填入卡密即可；也可直接编辑下方配置文件。
+3. 配置即时生效，无需重启。
 
-This covers most of what PlayIntegrityFix provided, so a separate PIF module is generally not
-needed. Note: LSPlt rewrites the PLT of libraries already loaded at process start; the hook is
-installed at app-specialize time. Set `DEVICE_INITIAL_SDK_INT` in `spoof_build_vars` to your
-spoofed device's launch SDK for the first-API-level checks.
+## 配置文件
 
-For Magisk users: if you don't need this feature and zygisk is disabled, please remove or rename the
-folder `/data/adb/modules/tricky_store/zygisk` manually.
+目录：`/data/adb/tricky_store/`
 
-## Support TEE broken devices
+| 文件 | 作用 |
+|---|---|
+| `target.txt` | 需要过检的包名，每行一个（`#` 开头为注释） |
+| `card.txt` | 卡密，把上面的测试卡密填进去 |
+| `proxy.txt` | 远端服务地址，留空用默认 |
 
-TEE-broken devices are supported out of the box: since attestation is forwarded to a
-remote clean device, no working local TEE/StrongBox attestation key is required. Just list
-the package in `target.txt`.
-
-For example:
+`target.txt` 示例：
 
 ```
-# target.txt
-io.github.vvb2060.keyattestation
 com.google.android.gms
+io.github.vvb2060.keyattestation
 ```
 
-Legacy `@` / `!` suffixes are accepted but ignored — every listed package goes through proxy.
+## 致谢
 
-## TODO
-
-- [Support Android 11 and below.](https://github.com/5ec1cff/TrickyStore/issues/25#issuecomment-2250588463)
-
-PR is welcomed.
-
-## Acknowledgement
-
+- [Tricky Store](https://github.com/5ec1cff/TrickyStore)
 - [PlayIntegrityFix](https://github.com/chiteroman/PlayIntegrityFix)
-- [FrameworkPatch](https://github.com/chiteroman/FrameworkPatch)
-- [BootloaderSpoofer](https://github.com/chiteroman/BootloaderSpoofer)
-- [KeystoreInjection](https://github.com/aviraxp/Zygisk-KeystoreInjection)
-- [LSPosed](https://github.com/LSPosed/LSPosed)
+- [LSPosed / LSPlt](https://github.com/LSPosed/LSPlt)
